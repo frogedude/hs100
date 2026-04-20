@@ -1,194 +1,202 @@
+﻿#include <stddef.h>
 #include <inttypes.h>
 #include <stdbool.h>
-#include <stddef.h>
-#include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
+#include <stdlib.h>
 
 #ifdef _WIN32
+#define _WINSOCK_DEPRECATED_NO_WARNINGS   // Disable deprecation warnings for inet_addr
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+#define SOCKET_TYPE SOCKET
+#define SOCKET_INVALID INVALID_SOCKET
+#define SOCKET_ERR(x) ((x) == INVALID_SOCKET)
+#define CLOSE_SOCKET(s) closesocket(s)
+#define GET_LAST_ERROR WSAGetLastError()
 #else
 #include <arpa/inet.h>
 #include <sys/socket.h>
-#include <netinet/in.h>
+#include <unistd.h>
 #include <netdb.h>
-#endif /* _WIN32 */
+#define SOCKET_TYPE int
+#define SOCKET_INVALID -1
+#define SOCKET_ERR(x) ((x) < 0)
+#define CLOSE_SOCKET(s) close(s)
+#define GET_LAST_ERROR errno
+#endif
 
 #include "comms.h"
 
-bool hs100_encrypt(uint8_t *d, const uint8_t *s, size_t len)
+#define RECV_BUF_SIZE	4096
+
+// --------------------------------------------------------------------
+// Encryption/Decryption (unchanged)
+// --------------------------------------------------------------------
+bool hs100_encrypt(uint8_t* d, uint8_t* s, size_t len)
 {
-	uint8_t key, temp;
-	size_t i;
-
-	if (d == NULL)
-		return false;
-	if (s == NULL)
-		return false;
-	if (len == 0)
-		return false;
-
-	key = 0xab;
-	for (i = 0; i < len; i++) {
-		temp = key ^ s[i];
-		key = temp;
-		d[i] = temp;
-	}
-	return true;
+    if (!d || !s || len == 0) return false;
+    uint8_t key = 0xab;
+    for (size_t i = 0; i < len; i++) {
+        uint8_t temp = key ^ s[i];
+        key = temp;
+        d[i] = temp;
+    }
+    return true;
 }
 
-bool hs100_decrypt(uint8_t *d, const uint8_t *s, size_t len)
+bool hs100_decrypt(uint8_t* d, uint8_t* s, size_t len)
 {
-	uint8_t key, temp;
-	size_t i;
-
-	if (d == NULL)
-		return false;
-	if (s == NULL)
-		return false;
-	if (len == 0)
-		return false;
-
-	key = 0xab;
-	for (i = 0; i < len; i++) {
-		temp = key ^ s[i];
-		key = s[i];
-		d[i] = temp;
-	}
-	return true;
+    if (!d || !s || len == 0) return false;
+    uint8_t key = 0xab;
+    for (size_t i = 0; i < len; i++) {
+        uint8_t temp = key ^ s[i];
+        key = s[i];
+        d[i] = temp;
+    }
+    return true;
 }
 
-uint8_t *hs100_encode(size_t *outlen, const char *srcmsg)
+// --------------------------------------------------------------------
+// Encode/Decode (with casts for C++ compatibility)
+// --------------------------------------------------------------------
+uint8_t* hs100_encode(size_t* outlen, char* srcmsg)
 {
-	size_t srcmsg_len;
-	uint8_t *d;
-	uint32_t temp;
-
-	if (srcmsg == NULL)
-		return NULL;
-
-	srcmsg_len = strlen(srcmsg);
-	*outlen = srcmsg_len + 4;
-	d = calloc(1, *outlen);
-	if (d == NULL)
-		return NULL;
-	if (!hs100_encrypt(d + 4, (uint8_t *) srcmsg, srcmsg_len)) {
-		free(d);
-		return NULL;
-	}
-	temp = htonl(srcmsg_len);
-	memcpy(d, &temp, 4);
-
-	return d;
+    if (!srcmsg) return NULL;
+    size_t srcmsg_len = strlen(srcmsg);
+    *outlen = srcmsg_len + 4;
+    uint8_t* d = (uint8_t*)calloc(1, *outlen);
+    if (!d) return NULL;
+    if (!hs100_encrypt(d + 4, (uint8_t*)srcmsg, srcmsg_len)) {
+        free(d);
+        return NULL;
+    }
+    uint32_t temp = htonl((uint32_t)srcmsg_len);
+    memcpy(d, &temp, 4);
+    return d;
 }
 
-char *hs100_decode(const uint8_t *s, size_t s_len)
+char* hs100_decode(uint8_t* s, size_t s_len)
 {
-	uint32_t in_s_len;
-	char *outbuf;
-
-	if (s == NULL)
-		return NULL;
-	if (s_len <= 4)
-		return NULL;
-
-	memcpy(&in_s_len, s, 4);
-	in_s_len = ntohl(in_s_len);
-	if ((s_len - 4) < in_s_len) {
-		/* packet was cut short- adjust in_s_len */
-		in_s_len = s_len - 4;
-	}
-
-	outbuf = calloc(1, in_s_len + 1);
-
-	if (!hs100_decrypt((uint8_t *) outbuf, s + 4, in_s_len)) {
-		free(outbuf);
-		return NULL;
-	}
-
-	return outbuf;
+    if (!s || s_len <= 4) return NULL;
+    uint32_t in_s_len;
+    memcpy(&in_s_len, s, 4);
+    in_s_len = ntohl(in_s_len);
+    if ((s_len - 4) < in_s_len)
+        in_s_len = (uint32_t)(s_len - 4);
+    char* outbuf = (char*)calloc(1, in_s_len + 1);
+    if (!outbuf) return NULL;
+    if (!hs100_decrypt((uint8_t*)outbuf, s + 4, in_s_len)) {
+        free(outbuf);
+        return NULL;
+    }
+    return outbuf;
 }
 
-char *hs100_send(const char *servaddr, const char *msg)
-{
-	size_t s_len;
-	struct sockaddr_in address;
-	char *recvmsg;
-	uint32_t msglen;
+// --------------------------------------------------------------------
+// Winsock Initialization (Windows only)
+// --------------------------------------------------------------------
 #ifdef _WIN32
-	char *s, *recvbuf;
-	int recvsize;
-	unsigned int sock;
-	WSADATA d;
+static int winsock_initted = 0;
+static void cleanup_winsock(void) {
+    WSACleanup();
+}
+static int ensure_winsock(void) {
+    if (!winsock_initted) {
+        WSADATA wsa;
+        if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
+            return 0;
+        winsock_initted = 1;
+        atexit(cleanup_winsock);
+    }
+    return 1;
+}
+#endif
 
-	s = (char *)hs100_encode(&s_len, msg);
-#else
-	uint8_t *s, *recvbuf;
-	int sock;
-	size_t recvsize;
-
-	s = hs100_encode(&s_len, msg);
-#endif /* _WIN32 */
-
-	if (s == NULL)
-		return NULL;
+// --------------------------------------------------------------------
+// Send function (cross‑platform)
+// --------------------------------------------------------------------
+char* hs100_send(char* servaddr, char* msg)
+{
+    size_t s_len;
+    uint8_t* s = hs100_encode(&s_len, msg);
+    if (!s) return NULL;
 
 #ifdef _WIN32
-	if (WSAStartup(MAKEWORD(2, 2), &d))
-		return NULL;
-	sock = socket(AF_INET, SOCK_STREAM, 0);
-	if (sock == INVALID_SOCKET)
-		return NULL;
-#else
-	sock = socket(AF_INET, SOCK_STREAM, 0);
-	if (sock < 0)
-		return NULL;
-#endif /* _WIN32 */
+    if (!ensure_winsock()) {
+        free(s);
+        return NULL;
+    }
+#endif
 
-	memset(&address, '0', sizeof(struct sockaddr_in));
+    SOCKET_TYPE sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (SOCKET_ERR(sock)) {
+        free(s);
+        return NULL;
+    }
 
-	address.sin_family = AF_INET;
-	address.sin_port = htons(9999);
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_port = htons(9999);
 
-	if (inet_pton(AF_INET, servaddr, &address.sin_addr) <= 0) {
-                struct hostent *lh = gethostbyname(servaddr);
-
-                if (lh == NULL) {
-		        return NULL;
-                }
-
-                if (lh->h_addrtype != AF_INET) {
-		        return NULL;
-                }
-
-                if (lh->h_addr_list[0] == NULL) {
-		        return NULL;
-                }
-
-                memcpy(&address.sin_addr, lh->h_addr_list[0], lh->h_length);
+    // Convert IP address or hostname
+    if (inet_pton(AF_INET, servaddr, &address.sin_addr) <= 0) {
+        // Fallback to inet_addr (deprecated but works; warning suppressed)
+        address.sin_addr.s_addr = inet_addr(servaddr);
+        if (address.sin_addr.s_addr == INADDR_NONE) {
+            struct hostent* he = gethostbyname(servaddr);
+            if (!he || he->h_addrtype != AF_INET) {
+                CLOSE_SOCKET(sock);
+                free(s);
+                return NULL;
+            }
+            memcpy(&address.sin_addr, he->h_addr_list[0], he->h_length);
         }
+    }
 
-	if (connect(sock, (const struct sockaddr*)&address, sizeof(struct sockaddr_in)) < 0)
-	{
-		return NULL;
-	}
+    if (connect(sock, (struct sockaddr*)&address, sizeof(address)) < 0) {
+        CLOSE_SOCKET(sock);
+        free(s);
+        return NULL;
+    }
 
-	send(sock, s, s_len, 0);
-	free(s);
-	recvsize = recv(sock, (char *)&msglen, sizeof(msglen), MSG_PEEK);
-	if (recvsize != sizeof(msglen)) {
-		return NULL;
-	}
-	msglen = ntohl(msglen) + 4;
-	recvbuf = calloc(1, (size_t) msglen);
-	recvsize = recv(sock, recvbuf, msglen, MSG_WAITALL);
-#ifdef _WIN32
-	closesocket(sock);
-#else
-	close(sock);
-#endif /* _WIN32 */
-	recvmsg = hs100_decode((const uint8_t *)recvbuf, msglen);
-	free(recvbuf);
-	return recvmsg;
+    // Send encoded message
+    if (send(sock, (const char*)s, (int)s_len, 0) != (int)s_len) {
+        CLOSE_SOCKET(sock);
+        free(s);
+        return NULL;
+    }
+    free(s);
+
+    // Read length prefix
+    uint32_t msglen = 0;
+    int received = recv(sock, (char*)&msglen, 4, MSG_PEEK);
+    if (received != 4) {
+        CLOSE_SOCKET(sock);
+        return NULL;
+    }
+    msglen = ntohl(msglen);
+    size_t total_len = msglen + 4;
+    uint8_t* recvbuf = (uint8_t*)malloc(total_len);
+    if (!recvbuf) {
+        CLOSE_SOCKET(sock);
+        return NULL;
+    }
+
+    size_t total = 0;
+    while (total < total_len) {
+        int r = recv(sock, (char*)recvbuf + total, (int)(total_len - total), 0);
+        if (r <= 0) {
+            free(recvbuf);
+            CLOSE_SOCKET(sock);
+            return NULL;
+        }
+        total += r;
+    }
+    CLOSE_SOCKET(sock);
+
+    char* recvmsg = hs100_decode(recvbuf, total_len);
+    free(recvbuf);
+    return recvmsg;
 }

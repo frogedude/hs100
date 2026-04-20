@@ -3,7 +3,7 @@
 A tool for using TP-Link HS100/HS103/HS105/HS110/HS300 wi-fi smart plugs.
 You can turn them on and off, reboot them, and so on. You can even set them up without using TP-Link's app (see Initial Setup).
 
-Tested to work on Linux, OSX, IRIX, and Windows under WSL.
+Tested to work on Linux, OSX, IRIX, and Windows under WSL. Ported to Windows.
 
 Loosely based on [pyHS100](https://github.com/GadgetReactor/pyHS100) and
 [research from softScheck](https://www.softscheck.com/en/reverse-engineering-tp-link-hs110/).
@@ -18,8 +18,10 @@ key\_type by doing a scan
 - `info`: get device information including device IDs
 - `emeter`: realtime power consumption (works with HS110 and HS300)
 - `factory-reset`: reset the plug to factory settings
+- `interactive`: enter interactive mode to toggle outlets
 - `off`: turn the power off
 - `on`: turn the power on
+- `outlet` <num> <on|off>: control a specific outlet number.
 - `reboot`: reboot the plug
 - `scan`: scan for nearby wifi APs (probably only 2.4 GHz ones)
 - `set_server <url>`: set cloud server to \<url\> instead of TP-Link's
